@@ -1,4 +1,4 @@
-from bleak import discover
+from bleak import BleakScanner
 from asyncio import new_event_loop, set_event_loop, get_event_loop
 from time import sleep, time_ns
 from binascii import hexlify
@@ -8,7 +8,7 @@ from datetime import datetime
 
 # Configure update duration (update after n seconds)
 UPDATE_DURATION = 1
-MIN_RSSI = -60
+MIN_RSSI = -70
 AIRPODS_MANUFACTURER = 76
 AIRPODS_DATA_LENGTH = 54
 RECENT_BEACONS_MAX_T_NS = 10000000000  # 10 Seconds
@@ -16,10 +16,10 @@ RECENT_BEACONS_MAX_T_NS = 10000000000  # 10 Seconds
 recent_beacons = []
 
 
-def get_best_result(device):
+def get_best_result(device_and_advertisement):
     recent_beacons.append({
         "time": time_ns(),
-        "device": device
+        "device": device_and_advertisement
     })
     strongest_beacon = None
     i = 0
@@ -27,12 +27,12 @@ def get_best_result(device):
         if(time_ns() - recent_beacons[i]["time"] > RECENT_BEACONS_MAX_T_NS):
             recent_beacons.pop(i)
             continue
-        if (strongest_beacon == None or strongest_beacon.rssi < recent_beacons[i]["device"].rssi):
+        if (strongest_beacon == None or strongest_beacon[1].rssi < recent_beacons[i]["device"][1].rssi):
             strongest_beacon = recent_beacons[i]["device"]
         i += 1
 
-    if (strongest_beacon != None and strongest_beacon.address == device.address):
-        strongest_beacon = device
+    if (strongest_beacon != None and strongest_beacon[0].address == device_and_advertisement[0].address):
+        strongest_beacon = device_and_advertisement
 
     return strongest_beacon
 
@@ -40,16 +40,17 @@ def get_best_result(device):
 # Getting data with hex format
 async def get_device():
     # Scanning for devices
-    devices = await discover()
-    for d in devices:
+    devices = await BleakScanner.discover(return_adv=True)
+    for _, d in devices.items():
         # Checking for AirPods
-        d = get_best_result(d)
-        if d.rssi >= MIN_RSSI and AIRPODS_MANUFACTURER in d.metadata['manufacturer_data']:
-            data_hex = hexlify(bytearray(d.metadata['manufacturer_data'][AIRPODS_MANUFACTURER]))
-            data_length = len(hexlify(bytearray(d.metadata['manufacturer_data'][AIRPODS_MANUFACTURER])))
-            if data_length == AIRPODS_DATA_LENGTH:
-                return data_hex
-    return False
+        d = get_best_result(d) # Conflicts with other bluetooth devices
+        ad = d[1] #Advertisement
+        d = d[0] #Device
+        if ad.rssi >= MIN_RSSI and AIRPODS_MANUFACTURER in ad.manufacturer_data.keys():
+            data_hex = hexlify(bytearray(ad.manufacturer_data[AIRPODS_MANUFACTURER]))
+            if len(data_hex) == AIRPODS_DATA_LENGTH and int(chr(data_hex[1]), 16) == 7:
+                return [d.address, data_hex]
+    return [0, False]
 
 
 # Same as get_device() but it's standalone method instead of async
@@ -65,7 +66,7 @@ def get_data_hex():
 # Getting data from hex string and converting it to dict(json)
 # Getting data from hex string and converting it to dict(json)
 def get_data():
-    raw = get_data_hex()
+    device, raw = get_data_hex()
 
     # Return blank data if airpods not found
     if not raw:
@@ -76,6 +77,8 @@ def get_data():
     # On 7th position we can get AirPods model, gen1, gen2, Pro or Max
     if chr(raw[7]) == 'e':
         model = "AirPodsPro"
+    elif chr(raw[7]) == '4':
+        model = "AirPodsPro2"
     elif chr(raw[7]) == '3':
         model = "AirPods3"
     elif chr(raw[7]) == 'f':
@@ -107,6 +110,7 @@ def get_data():
 
     # Return result info in dict format
     return dict(
+        address=device,
         status=1,
         charge=dict(
             left=left_status,
@@ -140,7 +144,7 @@ def run():
                 f.write(json_data+"\n")
                 f.close()
             else:
-                print(json_data)
+                print(json_data, flush=True)
 
         sleep(UPDATE_DURATION)
 
